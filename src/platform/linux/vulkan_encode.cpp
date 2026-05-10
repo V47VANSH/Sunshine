@@ -50,11 +50,20 @@ namespace vk {
 
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.apiVersion = VK_API_VERSION_1_1;
+
+    static const std::array<const char *, 1> instance_exts = {VK_EXT_PHYSICAL_DEVICE_DRM_EXTENSION_NAME};
     VkInstanceCreateInfo ci = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ci.pApplicationInfo = &app;
+    ci.enabledExtensionCount = instance_exts.size();
+    ci.ppEnabledExtensionNames = instance_exts.data();
     VkInstance inst = VK_NULL_HANDLE;
     if (vkCreateInstance(&ci, nullptr, &inst) != VK_SUCCESS) {
-      return {};
+      // Retry without the extension for loaders that don't support it
+      ci.enabledExtensionCount = 0;
+      ci.ppEnabledExtensionNames = nullptr;
+      if (vkCreateInstance(&ci, nullptr, &inst) != VK_SUCCESS) {
+        return {};
+      }
     }
 
     uint32_t count = 0;
@@ -79,7 +88,7 @@ namespace vk {
 
   static int create_vulkan_hwdevice(AVBufferRef **hw_device_buf) {
     // Resolve render device path to Vulkan device index
-    if (auto render_path = config::video.adapter_name.empty() ? "/dev/dri/renderD128" : config::video.adapter_name; render_path[0] == '/') {
+    if (auto render_path = platf::resolve_render_device(); render_path[0] == '/') {
       if (auto idx = find_vulkan_index_for_render_node(render_path.c_str()); !idx.empty() && av_hwdevice_ctx_create(hw_device_buf, AV_HWDEVICE_TYPE_VULKAN, idx.c_str(), nullptr, 0) >= 0) {
         return 0;
       }
@@ -217,7 +226,8 @@ namespace vk {
       vk_frames->tiling = VK_IMAGE_TILING_OPTIMAL;
       vk_frames->usage = (VkImageUsageFlagBits) (VK_IMAGE_USAGE_STORAGE_BIT |
                                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                                 VK_IMAGE_USAGE_SAMPLED_BIT);
+                                                 VK_IMAGE_USAGE_SAMPLED_BIT |
+                                                 VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR);
     }
 
     int convert(platf::img_t &img) override {
@@ -384,24 +394,74 @@ namespace vk {
       return true;
     }
 
-    static VkFormat drm_fourcc_to_vk_format(uint32_t fourcc) {
+    struct drm_format_info {
+      VkFormat format;
+      VkComponentMapping swizzle;
+    };
+
+    static drm_format_info drm_fourcc_to_vk_format(uint32_t fourcc) {
+      static constexpr VkComponentMapping identity = {
+        VK_COMPONENT_SWIZZLE_IDENTITY,
+        VK_COMPONENT_SWIZZLE_IDENTITY,
+        VK_COMPONENT_SWIZZLE_IDENTITY,
+        VK_COMPONENT_SWIZZLE_IDENTITY,
+      };
+      static constexpr VkComponentMapping bgr_swap = {
+        VK_COMPONENT_SWIZZLE_B,
+        VK_COMPONENT_SWIZZLE_G,
+        VK_COMPONENT_SWIZZLE_R,
+        VK_COMPONENT_SWIZZLE_A,
+      };
+
       switch (fourcc) {
         case DRM_FORMAT_XRGB8888:
         case DRM_FORMAT_ARGB8888:
-          return VK_FORMAT_B8G8R8A8_UNORM;
+          return {VK_FORMAT_B8G8R8A8_UNORM, identity};
         case DRM_FORMAT_XBGR8888:
         case DRM_FORMAT_ABGR8888:
-          return VK_FORMAT_R8G8B8A8_UNORM;
+          return {VK_FORMAT_R8G8B8A8_UNORM, identity};
         case DRM_FORMAT_XRGB2101010:
         case DRM_FORMAT_ARGB2101010:
-          return VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+          return {VK_FORMAT_A2R10G10B10_UNORM_PACK32, identity};
         case DRM_FORMAT_XBGR2101010:
         case DRM_FORMAT_ABGR2101010:
-          return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+          return {VK_FORMAT_A2B10G10R10_UNORM_PACK32, identity};
+        case DRM_FORMAT_XBGR16161616:
+        case DRM_FORMAT_ABGR16161616:
+          return {VK_FORMAT_R16G16B16A16_UNORM, identity};
+        case DRM_FORMAT_XRGB16161616:
+        case DRM_FORMAT_ARGB16161616:
+          return {VK_FORMAT_R16G16B16A16_UNORM, bgr_swap};
+        case DRM_FORMAT_XBGR16161616F:
+        case DRM_FORMAT_ABGR16161616F:
+          return {VK_FORMAT_R16G16B16A16_SFLOAT, identity};
+        case DRM_FORMAT_XRGB16161616F:
+        case DRM_FORMAT_ARGB16161616F:
+          return {VK_FORMAT_R16G16B16A16_SFLOAT, bgr_swap};
         default:
           BOOST_LOG(warning) << "Unknown DRM fourcc 0x" << std::hex << fourcc << std::dec << ", assuming B8G8R8A8";
-          return VK_FORMAT_B8G8R8A8_UNORM;
+          return {VK_FORMAT_B8G8R8A8_UNORM, identity};
       }
+    }
+
+    /**
+     * @brief Query the driver-expected plane count for a format+modifier pair.
+     * @return Expected plane count, or 0 if unknown.
+     */
+    int query_modifier_plane_count(VkFormat format, uint64_t modifier) {
+      VkDrmFormatModifierPropertiesListEXT mod_list = {VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT};
+      VkFormatProperties2 fmt_props2 = {VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2};
+      fmt_props2.pNext = &mod_list;
+      vkGetPhysicalDeviceFormatProperties2(vk_dev.phys_dev, format, &fmt_props2);
+      std::vector<VkDrmFormatModifierPropertiesEXT> mod_props(mod_list.drmFormatModifierCount);
+      mod_list.pDrmFormatModifierProperties = mod_props.data();
+      vkGetPhysicalDeviceFormatProperties2(vk_dev.phys_dev, format, &fmt_props2);
+      for (const auto &mp : mod_props) {
+        if (mp.drmFormatModifier == modifier) {
+          return mp.drmFormatModifierPlaneCount;
+        }
+      }
+      return 0;
     }
 
     bool import_dmabuf(const egl::surface_descriptor_t &sd) {
@@ -428,12 +488,22 @@ namespace vk {
       };
       VkImageTiling tiling;
 
+      auto [vk_format, vk_swizzle] = drm_fourcc_to_vk_format(sd.fourcc);
+
       if (sd.modifier != DRM_FORMAT_MOD_INVALID) {
-        int plane_count = 0;
+        int dmabuf_planes = 0;
         for (int i = 0; i < 4 && sd.fds[i] >= 0; ++i) {
+          dmabuf_planes++;
+        }
+
+        // Query driver for the expected plane count for this format+modifier.
+        // DMA-BUF exports may include extra metadata planes (e.g. AMD DCC).
+        int expected = query_modifier_plane_count(vk_format, sd.modifier);
+        int plane_count = (expected > 0 && expected <= dmabuf_planes) ? expected : dmabuf_planes;
+
+        for (int i = 0; i < plane_count; ++i) {
           drm_layouts[i].offset = sd.offsets[i];
           drm_layouts[i].rowPitch = sd.pitches[i];
-          plane_count++;
         }
         drm_ci.drmFormatModifier = sd.modifier;
         drm_ci.drmFormatModifierPlaneCount = plane_count;
@@ -443,8 +513,6 @@ namespace vk {
       } else {
         tiling = VK_IMAGE_TILING_LINEAR;
       }
-
-      auto vk_format = drm_fourcc_to_vk_format(sd.fourcc);
 
       VkImageCreateInfo img_ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
       img_ci.pNext = &ext_ci;
@@ -494,11 +562,12 @@ namespace vk {
 
       vkBindImageMemory(vk_dev.dev, src.image, src_mem, 0);
 
-      // Create image view (Vulkan sampling always returns RGBA order regardless of memory layout)
+      // Create image view
       VkImageViewCreateInfo view_ci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
       view_ci.image = src.image;
       view_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
       view_ci.format = vk_format;
+      view_ci.components = vk_swizzle;
       view_ci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
       VK_CHECK_BOOL(vkCreateImageView(vk_dev.dev, &view_ci, nullptr, &src.view));
 
@@ -738,18 +807,7 @@ namespace vk {
       submit.signalSemaphoreCount = sem_count;
       submit.pSignalSemaphores = signal_sems.data();
 
-      // Lock the queue (FFmpeg requires this)
-      vk_dev.ctx->lock_queue(
-        (AVHWDeviceContext *) ((AVHWFramesContext *) hw_frames_ctx->data)->device_ref->data,
-        vk_dev.compute_qf,
-        0
-      );
       auto res = vkQueueSubmit(vk_dev.compute_queue, 1, &submit, VK_NULL_HANDLE);
-      vk_dev.ctx->unlock_queue(
-        (AVHWDeviceContext *) ((AVHWFramesContext *) hw_frames_ctx->data)->device_ref->data,
-        vk_dev.compute_qf,
-        0
-      );
 
       if (res != VK_SUCCESS) {
         BOOST_LOG(error) << "vkQueueSubmit failed: " << res;
@@ -760,6 +818,7 @@ namespace vk {
       for (int i = 0; i < AV_NUM_DATA_POINTERS && vk_frame->img[i]; i++) {
         vk_frame->layout[i] = VK_IMAGE_LAYOUT_GENERAL;
         vk_frame->access[i] = VK_ACCESS_SHADER_WRITE_BIT;
+        vk_frame->queue_family[i] = vk_dev.compute_qf;
       }
 
       target.initialized = true;

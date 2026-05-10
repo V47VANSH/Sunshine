@@ -2048,11 +2048,10 @@ namespace video {
       }
     });
 
-    // set max frame time based on client-requested target framerate (or 0.5fps/2000ms for event-driven capture)
-    double def_fps_target = (disp->is_event_driven() ? 1 : config.framerate);
-    double minimum_fps_target = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target : def_fps_target;
+    // set max frame time based on client-requested target framerate.
+    double minimum_fps_target = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target : (config.framerate / 2);
     std::chrono::duration<double, std::milli> max_frametime {1000.0 / minimum_fps_target};
-    BOOST_LOG(info) << "Minimum FPS target set to ~"sv << (minimum_fps_target / 2) << "fps ("sv << max_frametime.count() * 2 << "ms)"sv;
+    BOOST_LOG(info) << "Minimum FPS target set to ~"sv << minimum_fps_target << "fps ("sv << max_frametime.count() << "ms)"sv;
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
@@ -2140,7 +2139,7 @@ namespace video {
     float scalar_tpcoords = 1.0f;
     int display_env_logical_width = 0;
     int display_env_logical_height = 0;
-    if (display->logical_width && display->logical_height && display->env_logical_width && display->env_logical_height) {
+    if (display->logical_width > 0 && display->logical_height > 0 && display->env_logical_width > 0 && display->env_logical_height > 0) {
       float lwd = display->logical_width;
       float lhd = display->logical_height;
       scalar_tpcoords = std::fminf(wd / lwd, hd / lhd);
@@ -2994,9 +2993,9 @@ namespace video {
       return hw_device_buf;
     }
 
-    auto render_device = config::video.adapter_name.empty() ? nullptr : config::video.adapter_name.c_str();
+    auto render_device = platf::resolve_render_device();
 
-    auto status = av_hwdevice_ctx_create(&hw_device_buf, AV_HWDEVICE_TYPE_VAAPI, render_device, nullptr, 0);
+    auto status = av_hwdevice_ctx_create(&hw_device_buf, AV_HWDEVICE_TYPE_VAAPI, render_device.empty() ? nullptr : render_device.c_str(), nullptr, 0);
     if (status < 0) {
       char string[AV_ERROR_MAX_STRING_SIZE];
       BOOST_LOG(error) << "Failed to create a VAAPI device: "sv << av_make_error_string(string, AV_ERROR_MAX_STRING_SIZE, status);
@@ -3019,10 +3018,10 @@ namespace video {
       return hw_device_buf;
     }
 
-    // Try render device path first (like VAAPI does), then fallback to device indices
-    auto render_device = config::video.adapter_name.empty() ? "/dev/dri/renderD128" : config::video.adapter_name.c_str();
+    // Try render device path first, auto-detecting the GPU with a connected display
+    auto render_device = platf::resolve_render_device();
 
-    auto status = av_hwdevice_ctx_create(&hw_device_buf, AV_HWDEVICE_TYPE_VULKAN, render_device, nullptr, 0);
+    auto status = av_hwdevice_ctx_create(&hw_device_buf, AV_HWDEVICE_TYPE_VULKAN, render_device.c_str(), nullptr, 0);
     if (status >= 0) {
       BOOST_LOG(info) << "Using Vulkan device: "sv << render_device;
       return hw_device_buf;
