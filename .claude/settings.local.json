@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/c/msys64/msys2_shell.cmd -defterm -no-start -ucrt64 -here -c \"cd 'd:/OneDrive/Documents/Projects/sungod/Sunshine/build' && cpack -G NSIS 2>&1\")",
+      "Bash(/c/msys64/msys2_shell.cmd -defterm -no-start -ucrt64 -here -c \"ldd 'd:/OneDrive/Documents/Projects/sungod/Sunshine/build/sunshine.exe' 2>&1\")",
+      "Bash(/c/msys64/msys2_shell.cmd -defterm -no-start -ucrt64 -here -c \"ntldd 'd:/OneDrive/Documents/Projects/sungod/Sunshine/build/sunshine.exe' 2>&1 || objdump -p 'd:/OneDrive/Documents/Projects/sungod/Sunshine/build/sunshine.exe' 2>&1 | grep 'DLL Name'\")",
+      "Bash(/c/msys64/msys2_shell.cmd -defterm -no-start -ucrt64 -here -c \"objdump -p 'd:/OneDrive/Documents/Projects/sungod/Sunshine/build/sunshine.exe' | grep 'DLL Name'\")",
+      "Bash(xxd \"d:/OneDrive/Documents/Projects/sungod/Sunshine/build/sunshine.exe\")",
+      "Bash(mkdir -p /c/SunshineBuild)",
+      "Read(//c//**)",
+      "Bash(rm -rf \"d:/OneDrive/Documents/Projects/sungod/Sunshine/build\")",
+      "Bash(/c/msys64/msys2_shell.cmd -defterm -no-start -ucrt64 -here -c \"cd 'd:/OneDrive/Documents/Projects/sungod/Sunshine' && cmake -B /c/SunshineBuild -G Ninja -S . -DBUILD_DOCS=OFF -DBUILD_TESTS=OFF 2>&1 | tail -5\")",
+      "Bash(/c/msys64/msys2_shell.cmd -defterm -no-start -ucrt64 -here -c \"cd /c/SunshineBuild && cpack -G NSIS --config ./CPackConfig.cmake 2>&1\")"
+    ]
+  }
+}

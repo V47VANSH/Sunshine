@@ -23,6 +23,7 @@
 #include "config.h"
 #include "display_device.h"
 #include "file_handler.h"
+#include "file_transfer.h"
 #include "globals.h"
 #include "httpcommon.h"
 #include "logging.h"
@@ -1171,6 +1172,12 @@ namespace nvhttp {
       resume(host_audio, resp, req);
     };
     https_server.resource["^/cancel$"]["GET"] = cancel;
+
+    // File transfer endpoints (authenticated via TLS client certificate)
+    https_server.resource["^/file-transfer/disks$"]["GET"] = file_transfer::disks;
+    https_server.resource["^/file-transfer/list$"]["GET"] = file_transfer::list;
+    https_server.resource["^/file-transfer/download$"]["GET"] = file_transfer::download;
+    https_server.resource["^/file-transfer/upload$"]["POST"] = file_transfer::upload;
 
     https_server.config.reuse_address = true;
     https_server.config.address = net::get_bind_address(address_family);
